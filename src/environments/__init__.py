@@ -14,5 +14,12 @@ register(
 )
 
 
+register(
+     id="NguyenPrbEnv",
+     entry_point="environments.nguyen_env:NguyenPrbEnv",
+     # max_episode_steps=100,
+)
+
+
 # test episode of 1 step each
 # episodes = 1e6

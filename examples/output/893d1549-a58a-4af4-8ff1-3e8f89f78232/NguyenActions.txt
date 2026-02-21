@@ -1,0 +1,1 @@
+timestamp,ru_cellid,imsi_from,imsi_to,delta_prb
