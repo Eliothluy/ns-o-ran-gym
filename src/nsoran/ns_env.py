@@ -226,7 +226,7 @@ class NsOranEnv(gym.Env):
             raise ValueError('Missing the list of values to perform control.')
 
         self.action_controller = ActionController(self.sim_path, self.log_file, self.control_file, self.control_header)
-        self.datalake = SQLiteDatabaseAPI(self.sim_path, num_ues_gnb=self.sim_result['params']['ues'], debug=False)
+        self.datalake = SQLiteDatabaseAPI(self.sim_path, num_ues_gnb=self.sim_result['params'].get('ues', self.sim_result['params'].get('nUes', 15)), debug=False)
         
         self._init_datalake_usecase()
 

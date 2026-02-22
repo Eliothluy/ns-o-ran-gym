@@ -1,12 +1,9 @@
 {
   "simTime": [10],
   "ues": [15],
-  "numRus": [2],
-  "prbsPerRu": [79],
-  "deltaPrb": [1],
-  "indicationPeriodicity": [0.1],
+  "ricPeriodicity": [0.1],
   "useSemaphores": [1],
   "controlFileName": ["nguyen_actions.csv"],
-  "embbDataRate": [15.0],
-  "RngRun": [1]
+  "enableTraces": [1],
+  "enableE2FileLogging": [1]
 }
