@@ -1,12 +1,14 @@
 """
-Nguyen PRB Allocation Environment
+Nguyen Environment - Resource Allocation for Open RAN Using Reinforcement Learning
 
-Implementa o artigo "Resource Allocation for Open Radio Access Networks
-Using Reinforcement Learning" (Nguyen et al., ATC 2025) como ambiente Gymnasium.
+Implementation of the Q-learning environment from:
+"Resource Allocation for Open Radio Access Networks Using Reinforcement Learning"
+Nguyen et al., ATC 2025
 
-Comunicacao:
-- Le: rl_state.csv (escrito pelo NS-3)
-- Escreve: nguyen_actions.csv (lido pelo NS-3)
+This environment implements:
+- State: PRB allocation profile and throughput satisfaction status (Eq. 10)
+- Action: Transfer PRBs from one UE to another (Section V.B.2)
+- Reward: Weighted sum of throughput and user satisfaction (Eq. 11)
 """
 
 from typing_extensions import override
@@ -16,56 +18,37 @@ from nsoran.ns_env import NsOranEnv
 import glob
 import csv
 import os
-import math
 
 
-class NguyenPrbEnv(NsOranEnv):
+class NguyenEnv(NsOranEnv):
     """
-    Ambiente Gymnasium para alocacao de PRBs baseado no artigo Nguyen et al.
-
-    Estado: Para cada UE - (prbs_allocated, snr_db, throughput, qos_satisfied)
-    Acao: Para cada RU - (imsi_from, imsi_to) indicando transferencia de delta PRBs
-    Reward: Equacao 11 do artigo - maximiza throughput com restricao QoS
+    Gymnasium environment for PRB allocation in O-RAN using Q-learning.
+    Based on Nguyen et al. ATC 2025 paper.
     """
 
-    # Schema da tabela rl_state no datalake
-    rl_state_keys = {
-        "timestamp": "INTEGER",
-        "ueImsiComplete": "INTEGER",
-        "ru_cellid": "INTEGER",
-        "distance_m": "REAL",
-        "snr_db": "REAL"
-    }
+    # Article parameters (Table I)
+    NUM_RU = 2                      # Number of Radio Units
+    NUM_PRB_PER_RU = 79             # PRBs per RU
+    R_MIN_MBPS = 10.0               # Minimum QoS requirement (Mbps)
+    T_MIN_MBPS = 1.0                # Scaling factor for throughput
+    PRB_BANDWIDTH_MHZ = 0.18        # Bandwidth per PRB (MHz)
+    TX_POWER_W = 0.01               # Power per PRB (W)
 
-    # Schema da tabela prb_allocation
-    prb_allocation_keys = {
-        "timestamp": "INTEGER",
-        "ueImsiComplete": "INTEGER",
-        "ru_cellid": "INTEGER",
-        "prbs_allocated": "INTEGER"
-    }
+    # Q-learning hyperparameters (Section VI.A)
+    DELTA = 0.9999                  # Weight factor (prioritizes user satisfaction)
+    LAMBDA = 0.1                    # Penalty/bonus coefficient
+    DELTA_PRB = 1                   # PRBs transferred per action
 
-    # Schema para grafana/metricas
-    grafana_keys = {
-        "timestamp": "INTEGER",
-        "ueImsiComplete": "INTEGER",
-        "step": "INTEGER",
-        "total_throughput": "REAL",
-        "qos_satisfied_count": "INTEGER",
-        "total_ues": "INTEGER",
-        "reward": "REAL",
-        "epsilon": "REAL"
-    }
-
-    def __init__(self, ns3_path: str, scenario_configuration: dict, output_folder: str, optimized: bool):
+    def __init__(self, ns3_path: str, scenario_configuration: dict,
+                 output_folder: str, optimized: bool):
         """
-        Inicializa o ambiente Nguyen PRB.
+        Initialize the Nguyen environment.
 
         Args:
-            ns3_path: Caminho para o NS-3 mmWave O-RAN
-            scenario_configuration: Dict com parametros do cenario
-            output_folder: Pasta para outputs
-            optimized: Se True, usa build otimizado do NS-3
+            ns3_path: Path to ns-3 mmWave O-RAN installation
+            scenario_configuration: Dictionary with simulation parameters
+            output_folder: Output folder for simulation data
+            optimized: If True, run ns-3 in optimized mode
         """
         super().__init__(
             ns3_path=ns3_path,
@@ -73,312 +56,338 @@ class NguyenPrbEnv(NsOranEnv):
             scenario_configuration=scenario_configuration,
             output_folder=output_folder,
             optimized=optimized,
-            control_header=['timestamp', 'ru_cellid', 'imsi_from', 'imsi_to', 'delta_prb'],
+            control_header=['timestamp', 'ueId', 'prbAllocation'],
             log_file='NguyenActions.txt',
             control_file='nguyen_actions.csv'
         )
 
         self.folder_name = "Simulation"
-        self.ns3_simulation_time = scenario_configuration['simTime'] * 1000  # ms
+        self.ns3_simulation_time = scenario_configuration.get('simTime', [10])[0] * 1000
 
-        # Parametros do artigo Nguyen
-        self.num_rus = scenario_configuration.get('numRus', 2)
-        self.prbs_per_ru = scenario_configuration.get('prbsPerRu', 79)
-        self.delta_prb = scenario_configuration.get('deltaPrb', 2)
-        self.ues_per_ru = scenario_configuration.get('ues', 15)
+        # Number of UEs (K in the article)
+        self.num_ues = scenario_configuration.get('ues', [15])[0]
 
-        # Constantes fisicas do artigo
-        self.W_r_mbps = 0.18  # Banda por PRB em MHz [cite: 241]
-        self.R_min = 10.0     # QoS: 10 Mbps [cite: 241]
-        self.T_min = 1.0      # Fator de escala
-        self.delta_reward = 0.9999  # Prioridade para satisfacao QoS [cite: 247]
-        self.lambda_param = 0.05    # Ajuste fino
+        # State columns: PRBs allocated per UE + satisfaction status per UE
+        # x_k^i(t) for each UE k and RU i, plus pi_k(t) for each UE k
+        self.prb_columns = [f'prb_ue_{k}' for k in range(self.num_ues)]
+        self.satisfied_columns = [f'satisfied_ue_{k}' for k in range(self.num_ues)]
+        self.throughput_columns = [f'throughput_ue_{k}' for k in range(self.num_ues)]
 
-        # Estado interno: alocacao de PRBs {ru_id: {imsi: prbs}}
-        self.prb_allocation = {}
+        self.columns_state = self.prb_columns + self.satisfied_columns
+        self.columns_reward = ['total_throughput', 'num_satisfied', 'throughput_gap']
 
-        # Lista de UEs por RU {ru_id: [imsi1, imsi2, ...]}
-        self.ues_by_ru = {}
+        # Action space: (k_from, k_to) pairs
+        # Action i = k_from * num_ues + k_to means transfer PRBs from k_from to k_to
+        self.num_actions = self.num_ues * self.num_ues
 
-        # Ultimo estado para cada RU (para Q-learning externo)
-        self.last_states = {}
-
-        # Contador de steps
+        # Internal state tracking
+        self.prb_allocation = {}  # {ue_id: num_prbs}
+        self.ue_throughput = {}   # {ue_id: throughput_mbps}
+        self.observations = None
         self.num_steps = 0
 
-        # Cache do ultimo rl_state lido
-        self.current_rl_state = None
-
-    def _calculate_throughput(self, prbs: int, snr_db: float) -> float:
-        """
-        Equacao 2 do Artigo: R_k(t) = x_k^i * W_r * log2(1 + SNR)
-
-        Args:
-            prbs: Numero de PRBs alocados
-            snr_db: SNR em dB
-
-        Returns:
-            Throughput em Mbps
-        """
-        if prbs <= 0:
-            return 0.0
-        snr_linear = 10 ** (snr_db / 10.0)
-        return prbs * self.W_r_mbps * math.log2(1 + snr_linear)
-
-    def _calculate_reward_from_throughputs(self, throughput_dict: dict) -> float:
-        """
-        Equacao 11 do Artigo: Reward function
-
-        Args:
-            throughput_dict: {imsi: throughput_mbps}
-
-        Returns:
-            Reward escalar
-        """
-        T_t = sum(throughput_dict.values())  # Throughput total
-        pi_sum = 0  # Contador de UEs com QoS satisfeito
-        penalty_bonus_sum = 0
-
-        for R_k in throughput_dict.values():
-            if R_k >= self.R_min:
-                pi_sum += 1  # pi_k(t) = 1 [cite: 98, 103]
-            penalty_bonus_sum += (R_k - self.R_min) / self.T_min  # [cite: 181]
-
-        reward = (
-            (1 - self.delta_reward) * (T_t / self.T_min) +
-            (self.delta_reward * pi_sum) +
-            (self.lambda_param * penalty_bonus_sum)
-        )  # [cite: 179]
-
-        return reward
+        # RU assignment (which UEs belong to which RU)
+        self.ue_to_ru = {}
+        ues_per_ru = self.num_ues // self.NUM_RU
+        for ue in range(self.num_ues):
+            self.ue_to_ru[ue] = ue // ues_per_ru if ues_per_ru > 0 else 0
 
     @override
     def _compute_action(self, action):
         """
-        Converte acao do agente para formato NS-3.
+        Convert agent action to ns-O-RAN format.
 
-        Formato de entrada (action):
-            Lista de tuplas [(ru_id, imsi_from, imsi_to), ...]
-            ou dict {ru_id: (imsi_from, imsi_to), ...}
+        Action is an integer representing (k_from, k_to) pair:
+        - action = k_from * num_ues + k_to
+        - Transfers DELTA_PRB PRBs from UE k_from to UE k_to
 
-        Formato de saida:
-            [[ru_id, imsi_from, imsi_to, delta_prb], ...]
+        Args:
+            action: Integer action index or tuple (k_from, k_to)
+
+        Returns:
+            List of tuples [(ue_id, prb_allocation), ...]
         """
-        actions_list = []
+        if isinstance(action, (list, tuple)) and len(action) == 2:
+            k_from, k_to = action
+        else:
+            k_from = action // self.num_ues
+            k_to = action % self.num_ues
 
-        if isinstance(action, dict):
-            # Formato: {ru_id: (imsi_from, imsi_to)}
-            for ru_id, (imsi_from, imsi_to) in action.items():
-                actions_list.append([ru_id, imsi_from, imsi_to, self.delta_prb])
-        elif isinstance(action, list):
-            for act in action:
-                if len(act) == 3:
-                    # (ru_id, imsi_from, imsi_to)
-                    ru_id, imsi_from, imsi_to = act
-                    actions_list.append([ru_id, imsi_from, imsi_to, self.delta_prb])
-                elif len(act) == 4:
-                    # (ru_id, imsi_from, imsi_to, delta_prb)
-                    actions_list.append(list(act))
+        # Validate action
+        if k_from == k_to:
+            # No-op action
+            return self._get_current_allocation_actions()
 
-        # Atualizar alocacao interna de PRBs
-        for ru_id, imsi_from, imsi_to, delta in actions_list:
-            if ru_id in self.prb_allocation:
-                if imsi_from in self.prb_allocation[ru_id]:
-                    if self.prb_allocation[ru_id][imsi_from] >= delta:
-                        self.prb_allocation[ru_id][imsi_from] -= delta
-                        self.prb_allocation[ru_id][imsi_to] = \
-                            self.prb_allocation[ru_id].get(imsi_to, 0) + delta
+        # Check if UEs are in the same RU (article constraint)
+        if self.ue_to_ru.get(k_from, 0) != self.ue_to_ru.get(k_to, 0):
+            # Cross-RU transfer not allowed, return current allocation
+            return self._get_current_allocation_actions()
 
-        return actions_list
+        # Transfer PRBs
+        current_from = self.prb_allocation.get(k_from, 0)
+        current_to = self.prb_allocation.get(k_to, 0)
+
+        if current_from >= self.DELTA_PRB:
+            self.prb_allocation[k_from] = current_from - self.DELTA_PRB
+            self.prb_allocation[k_to] = current_to + self.DELTA_PRB
+
+        return self._get_current_allocation_actions()
+
+    def _get_current_allocation_actions(self):
+        """Get current PRB allocation as action list for ns-3."""
+        actions = []
+        for ue_id in range(self.num_ues):
+            prbs = self.prb_allocation.get(ue_id, 0)
+            actions.append([ue_id, prbs])
+        return actions
 
     @override
     def _get_obs(self):
         """
-        Constroi observacao a partir do rl_state.csv e alocacao de PRBs.
+        Get current observation (state).
 
-        Retorna:
-            Tupla com observacao para cada RU:
-            {ru_id: {
-                'ues': {imsi: {'prbs': int, 'snr': float, 'throughput': float, 'qos': bool}},
-                'total_throughput': float,
-                'qos_satisfied': int,
-                'state_str': str  # Para uso com Q-table
-            }}
+        State representation (Eq. 10):
+        s_i = {x_k^i(t) | k in K}, {pi_k(t) | k in K}
+
+        Returns:
+            Tuple of state values
         """
-        # Ler rl_state do datalake
-        rl_state_data = self.datalake.read_table('rl_state')
+        # Read KPMs from datalake
+        kpms_raw = ["ueImsiComplete", "nrCellId", "RRU.PrbUsedDl",
+                    "DRB.PdcpSduBitRateDl.UEID"]
 
-        if not rl_state_data:
-            return self._get_empty_obs()
+        try:
+            ue_kpms = self.datalake.read_kpms(self.last_timestamp, kpms_raw)
+        except Exception:
+            ue_kpms = []
 
-        # Filtrar pelo ultimo timestamp
-        latest_timestamp = max(row[0] for row in rl_state_data)
-        current_data = [row for row in rl_state_data if row[0] == latest_timestamp]
+        # Process KPMs to extract PRB allocation and throughput
+        self._process_kpms(ue_kpms)
 
-        # Organizar por RU
-        obs = {}
-        for row in current_data:
-            timestamp, imsi, ru_id, distance, snr = row
+        # Build state vector
+        state = []
 
-            if ru_id not in obs:
-                obs[ru_id] = {'ues': {}, 'total_throughput': 0.0, 'qos_satisfied': 0}
+        # PRB allocation for each UE: x_k^i(t)
+        for ue in range(self.num_ues):
+            prbs = self.prb_allocation.get(ue, 0)
+            state.append(prbs)
 
-            # Inicializar alocacao se necessario
-            if ru_id not in self.prb_allocation:
-                self.prb_allocation[ru_id] = {}
-            if imsi not in self.prb_allocation[ru_id]:
-                # Distribuir PRBs igualmente na primeira vez
-                num_ues = len([r for r in current_data if r[2] == ru_id])
-                prbs_per_ue = self.prbs_per_ru // max(1, num_ues)
-                self.prb_allocation[ru_id][imsi] = prbs_per_ue
+        # Satisfaction status for each UE: pi_k(t)
+        for ue in range(self.num_ues):
+            throughput = self.ue_throughput.get(ue, 0)
+            satisfied = 1 if throughput >= self.R_MIN_MBPS else 0
+            state.append(satisfied)
 
-            # Atualizar lista de UEs
-            if ru_id not in self.ues_by_ru:
-                self.ues_by_ru[ru_id] = []
-            if imsi not in self.ues_by_ru[ru_id]:
-                self.ues_by_ru[ru_id].append(imsi)
+        self.observations = state
+        return tuple([tuple(state)])
 
-            prbs = self.prb_allocation[ru_id][imsi]
-            throughput = self._calculate_throughput(prbs, snr)
-            qos_satisfied = throughput >= self.R_min
+    def _process_kpms(self, ue_kpms):
+        """
+        Process KPMs to extract PRB allocation and throughput per UE.
 
-            obs[ru_id]['ues'][imsi] = {
-                'prbs': prbs,
-                'snr': snr,
-                'distance': distance,
-                'throughput': throughput,
-                'qos': qos_satisfied
-            }
-            obs[ru_id]['total_throughput'] += throughput
-            if qos_satisfied:
-                obs[ru_id]['qos_satisfied'] += 1
+        Args:
+            ue_kpms: List of KPM tuples from datalake
+        """
+        # Reset tracking
+        temp_prb = {}
+        temp_throughput = {}
 
-        # Gerar state_str para cada RU (compativel com Q-table)
-        for ru_id in obs:
-            prb_tuple = tuple(sorted(self.prb_allocation[ru_id].items()))
-            pi_tuple = tuple(sorted(
-                (imsi, 1 if data['qos'] else 0)
-                for imsi, data in obs[ru_id]['ues'].items()
-            ))
-            obs[ru_id]['state_str'] = str((prb_tuple, pi_tuple))
+        for kpm in ue_kpms:
+            if len(kpm) >= 4:
+                ue_imsi = kpm[0]
+                cell_id = kpm[1]
+                prb_used = kpm[2] if kpm[2] is not None else 0
+                throughput = kpm[3] if kpm[3] is not None else 0
 
-        self.current_rl_state = obs
-        return obs
+                # Map IMSI to UE index (0-based)
+                ue_idx = (ue_imsi - 1) % self.num_ues if ue_imsi > 0 else 0
 
-    def _get_empty_obs(self):
-        """Retorna observacao vazia quando nao ha dados."""
-        return {}
+                # Accumulate PRBs and throughput
+                temp_prb[ue_idx] = temp_prb.get(ue_idx, 0) + prb_used
+                temp_throughput[ue_idx] = temp_throughput.get(ue_idx, 0) + throughput
+
+        # Update internal state
+        if temp_prb:
+            self.prb_allocation = temp_prb
+        if temp_throughput:
+            self.ue_throughput = temp_throughput
+
+        # Initialize missing UEs with fair allocation
+        if not self.prb_allocation:
+            prbs_per_ue = self.NUM_PRB_PER_RU // (self.num_ues // self.NUM_RU)
+            for ue in range(self.num_ues):
+                self.prb_allocation[ue] = prbs_per_ue
 
     @override
     def _compute_reward(self):
         """
-        Calcula reward usando Equacao 11 do artigo.
-        Combina rewards de todos os RUs.
+        Compute reward according to Equation 11.
+
+        r_i = (1-delta) * T(t)/T_min + delta * sum(pi_k(t))
+              + lambda * sum((R_k(t) - R_min,k) / T_min)
+
+        Returns:
+            Float reward value
         """
-        if not self.current_rl_state:
-            return 0.0
+        self.num_steps += 1
 
-        total_reward = 0.0
-        total_throughput = 0.0
-        total_qos = 0
-        total_ues = 0
+        # Calculate total throughput T(t)
+        total_throughput = sum(self.ue_throughput.values())
 
-        for ru_id, ru_data in self.current_rl_state.items():
-            throughput_dict = {
-                imsi: data['throughput']
-                for imsi, data in ru_data['ues'].items()
+        # Calculate number of satisfied users sum(pi_k(t))
+        num_satisfied = sum(
+            1 for ue in range(self.num_ues)
+            if self.ue_throughput.get(ue, 0) >= self.R_MIN_MBPS
+        )
+
+        # Calculate throughput gap sum((R_k(t) - R_min,k) / T_min)
+        throughput_gap = sum(
+            (self.ue_throughput.get(ue, 0) - self.R_MIN_MBPS) / self.T_MIN_MBPS
+            for ue in range(self.num_ues)
+        )
+
+        # Compute reward (Eq. 11)
+        reward = (
+            (1 - self.DELTA) * (total_throughput / self.T_MIN_MBPS) +
+            self.DELTA * num_satisfied +
+            self.LAMBDA * throughput_gap
+        )
+
+        # Store for logging
+        self._log_reward_components(total_throughput, num_satisfied, throughput_gap, reward)
+
+        return reward
+
+    def _log_reward_components(self, throughput, satisfied, gap, reward):
+        """Log reward components to datalake for analysis."""
+        try:
+            db_row = {
+                'timestamp': self.last_timestamp,
+                'ueImsiComplete': None,
+                'step': self.num_steps,
+                'total_throughput': float(throughput),
+                'num_satisfied': int(satisfied),
+                'throughput_gap': float(gap),
+                'reward': float(reward),
+                'acceptance_rate': float(satisfied / self.num_ues * 100) if self.num_ues > 0 else 0
             }
-            total_reward += self._calculate_reward_from_throughputs(throughput_dict)
-            total_throughput += ru_data['total_throughput']
-            total_qos += ru_data['qos_satisfied']
-            total_ues += len(ru_data['ues'])
-
-        # Salvar metricas no grafana
-        self._save_metrics(total_throughput, total_qos, total_ues, total_reward)
-
-        return total_reward
-
-    def _save_metrics(self, throughput: float, qos: int, ues: int, reward: float):
-        """Salva metricas no datalake para visualizacao."""
-        db_row = {
-            'timestamp': self.last_timestamp,
-            'ueImsiComplete': None,
-            'step': self.num_steps,
-            'total_throughput': throughput,
-            'qos_satisfied_count': qos,
-            'total_ues': ues,
-            'reward': reward,
-            'epsilon': 0.0  # Sera atualizado pelo agente externo se necessario
-        }
-        self.datalake.insert_data("grafana", db_row)
+            self.datalake.insert_data("nguyen_metrics", db_row)
+        except Exception:
+            pass  # Logging failure should not break the environment
 
     @override
     def _init_datalake_usecase(self):
-        """Inicializa tabelas especificas do caso de uso."""
-        self.datalake._create_table("rl_state", self.rl_state_keys)
-        self.datalake._create_table("prb_allocation", self.prb_allocation_keys)
-        self.datalake._create_table("grafana", self.grafana_keys)
+        """Initialize datalake tables for Nguyen use case."""
+        # Metrics table for tracking performance
+        metrics_keys = {
+            "timestamp": "INTEGER",
+            "ueImsiComplete": "INTEGER",
+            "step": "INTEGER",
+            "total_throughput": "REAL",
+            "num_satisfied": "INTEGER",
+            "throughput_gap": "REAL",
+            "reward": "REAL",
+            "acceptance_rate": "REAL"
+        }
+
+        # PRB allocation history
+        prb_keys = {
+            "timestamp": "INTEGER",
+            "ueImsiComplete": "INTEGER",
+            "ueId": "INTEGER",
+            "prbAllocation": "INTEGER",
+            "throughput": "REAL"
+        }
+
+        self.datalake._create_table("nguyen_metrics", metrics_keys)
+        self.datalake._create_table("nguyen_prb", prb_keys)
+
         return super()._init_datalake_usecase()
 
     @override
     def _fill_datalake_usecase(self):
-        """Le rl_state.csv e insere no datalake."""
-        rl_state_path = os.path.join(self.sim_path, 'rl_state.csv')
+        """Fill datalake with use-case specific data."""
+        # Log current PRB allocation
+        for ue_id, prbs in self.prb_allocation.items():
+            try:
+                db_row = {
+                    'timestamp': self.last_timestamp,
+                    'ueImsiComplete': None,
+                    'ueId': ue_id,
+                    'prbAllocation': prbs,
+                    'throughput': self.ue_throughput.get(ue_id, 0)
+                }
+                self.datalake.insert_data("nguyen_prb", db_row)
+            except Exception:
+                pass
 
-        if not os.path.exists(rl_state_path):
-            return
-
-        try:
-            with open(rl_state_path, 'r') as csvfile:
-                reader = csv.DictReader(csvfile)
-                for row in reader:
-                    timestamp = int(row['timestamp_ms'])
-                    if timestamp >= self.last_timestamp:
-                        db_row = {
-                            'timestamp': timestamp,
-                            'ueImsiComplete': int(row['ue_imsi']),
-                            'ru_cellid': int(row['ru_cellid']),
-                            'distance_m': float(row['distance_m']),
-                            'snr_db': float(row['snr_db'])
-                        }
-                        self.datalake.insert_data("rl_state", db_row)
-                        self.last_timestamp = timestamp
-        except (FileNotFoundError, KeyError, ValueError) as e:
-            pass  # Arquivo ainda nao existe ou formato incorreto
-
-    def get_ues_for_ru(self, ru_id: int) -> list:
-        """Retorna lista de IMSIs para um RU especifico."""
-        return self.ues_by_ru.get(ru_id, [])
-
-    def get_prb_allocation(self, ru_id: int = None) -> dict:
+    def get_state_for_ru(self, ru_id: int):
         """
-        Retorna alocacao atual de PRBs.
+        Get state representation for a specific RU.
+        Used for multi-agent Q-learning where each RU is an agent.
 
         Args:
-            ru_id: Se especificado, retorna apenas para este RU
+            ru_id: RU identifier (0 or 1)
 
         Returns:
-            Dict com alocacao {ru_id: {imsi: prbs}} ou {imsi: prbs}
+            Tuple of (prb_allocation, satisfaction_status) for UEs in this RU
         """
-        if ru_id is not None:
-            return self.prb_allocation.get(ru_id, {})
-        return self.prb_allocation
+        state = []
 
-    def get_state_str(self, ru_id: int) -> str:
-        """Retorna string de estado para uso com Q-table."""
-        if self.current_rl_state and ru_id in self.current_rl_state:
-            return self.current_rl_state[ru_id].get('state_str', '')
-        return ''
+        for ue in range(self.num_ues):
+            if self.ue_to_ru.get(ue, 0) == ru_id:
+                prbs = self.prb_allocation.get(ue, 0)
+                throughput = self.ue_throughput.get(ue, 0)
+                satisfied = 1 if throughput >= self.R_MIN_MBPS else 0
+                state.extend([prbs, satisfied])
 
-    def step(self, action):
+        return tuple(state)
+
+    def get_valid_actions_for_ru(self, ru_id: int):
         """
-        Executa um passo no ambiente.
+        Get valid actions for a specific RU.
+        Only allows transfers between UEs in the same RU.
 
         Args:
-            action: Acao do agente (dict ou lista de tuplas)
+            ru_id: RU identifier
 
         Returns:
-            (obs, reward, terminated, truncated, info)
+            List of valid action indices
         """
-        self.num_steps += 1
-        return super().step(action)
+        valid_actions = []
+        ues_in_ru = [ue for ue in range(self.num_ues) if self.ue_to_ru.get(ue, 0) == ru_id]
+
+        for k_from in ues_in_ru:
+            for k_to in ues_in_ru:
+                if k_from != k_to and self.prb_allocation.get(k_from, 0) >= self.DELTA_PRB:
+                    action = k_from * self.num_ues + k_to
+                    valid_actions.append(action)
+
+        return valid_actions
+
+    def get_metrics(self):
+        """
+        Get current performance metrics for evaluation.
+
+        Returns:
+            Dictionary with acceptance_rate, sum_throughput, objective_value
+        """
+        num_satisfied = sum(
+            1 for ue in range(self.num_ues)
+            if self.ue_throughput.get(ue, 0) >= self.R_MIN_MBPS
+        )
+
+        total_throughput = sum(self.ue_throughput.values())
+
+        # Objective function (Eq. 7)
+        objective = (
+            (1 - self.DELTA) * (total_throughput / self.T_MIN_MBPS) +
+            self.DELTA * num_satisfied
+        )
+
+        return {
+            'acceptance_rate': num_satisfied / self.num_ues * 100 if self.num_ues > 0 else 0,
+            'sum_throughput': total_throughput,
+            'num_satisfied': num_satisfied,
+            'objective_value': objective
+        }
