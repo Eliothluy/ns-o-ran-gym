@@ -7,11 +7,11 @@ if __name__ == '__main__':
     # Parse arguments #
     #######################
     parser = argparse.ArgumentParser(description="Run the energy saving environment")
-    parser.add_argument("--config", type=str, default="src/environments/scenario_configurations/es_use_case.json",
+    parser.add_argument("--config", type=str, default="/home/eliothluy/Documentos/artigoJussi/ns-o-ran-gym/src/environments/scenario_configurations/es_use_case.json",
                         help="Path to the configuration file")
     parser.add_argument("--output_folder", type=str, default="output",
                         help="Path to the output folder")
-    parser.add_argument("--ns3_path", type=str, default="/workspace/ns3-mmwave-oran",
+    parser.add_argument("--ns3_path", type=str, default="/home/eliothluy/Documentos/artigoJussi/ns-3-mmwave-oran/",
                         help="Path to the ns-3 mmWave O-RAN environment")
     parser.add_argument("--num_steps", type=int, default=1000,
                         help="Number of steps to run in the environment")

@@ -1,0 +1,8 @@
+set label "2" at 2000,2000 left font "Helvetica,8" textcolor rgb "red" front  point pt 4 ps 0.3 lc rgb "red" offset 0,0
+set label "3" at 3000,2000 left font "Helvetica,8" textcolor rgb "red" front  point pt 4 ps 0.3 lc rgb "red" offset 0,0
+set label "4" at 2500,2866.03 left font "Helvetica,8" textcolor rgb "red" front  point pt 4 ps 0.3 lc rgb "red" offset 0,0
+set label "5" at 1500,2866.03 left font "Helvetica,8" textcolor rgb "red" front  point pt 4 ps 0.3 lc rgb "red" offset 0,0
+set label "6" at 1000,2000 left font "Helvetica,8" textcolor rgb "red" front  point pt 4 ps 0.3 lc rgb "red" offset 0,0
+set label "7" at 1500,1133.97 left font "Helvetica,8" textcolor rgb "red" front  point pt 4 ps 0.3 lc rgb "red" offset 0,0
+set label "8" at 2500,1133.97 left font "Helvetica,8" textcolor rgb "red" front  point pt 4 ps 0.3 lc rgb "red" offset 0,0
+set label "1" at 2000,2000 left font "Helvetica,8" textcolor rgb "blue" front  point pt 4 ps 0.3 lc rgb "blue" offset 0,0

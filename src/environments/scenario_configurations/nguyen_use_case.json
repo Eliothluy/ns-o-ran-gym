@@ -3,7 +3,7 @@
   "ues": [15],
   "numRus": [2],
   "prbsPerRu": [79],
-  "deltaPrb": [2],
+  "deltaPrb": [1],
   "indicationPeriodicity": [0.1],
   "useSemaphores": [1],
   "controlFileName": ["nguyen_actions.csv"],

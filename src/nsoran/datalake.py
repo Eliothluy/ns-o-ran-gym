@@ -118,6 +118,29 @@ class SQLiteDatabaseAPI:
         "DRB.UEThpDlPdcpBased.UEID": "REAL"
     }
 
+    # =====================================================================
+    # NOVAS TABELAS PARA O ARTIGO NGUYEN ET AL.
+    # =====================================================================
+    nguyen_metrics_keys = {
+        "timestamp": "INTEGER",
+        "ueImsiComplete": "INTEGER", # Para compatibilidade com UNIQUE
+        "step": "INTEGER",
+        "total_throughput": "REAL",
+        "num_satisfied": "INTEGER",
+        "throughput_gap": "REAL",
+        "reward": "REAL",
+        "acceptance_rate": "REAL",
+        "objective_value": "REAL"
+    }
+
+    nguyen_prb_keys = {
+        "timestamp": "INTEGER",
+        "ueImsiComplete": "INTEGER", # Para compatibilidade com UNIQUE
+        "ueId": "INTEGER",
+        "prbAllocation": "INTEGER",
+        "throughput": "REAL"
+    }
+
     debug: bool = False
 
     def __init__(self, simulation_dir, num_ues_gnb, debug=False):
@@ -141,6 +164,11 @@ class SQLiteDatabaseAPI:
         self._create_table("lte_cu_up", self.lte_cu_up_keys)
         self._create_table("gnb_cu_up", self.gnb_cu_up_keys)
         self._create_table("du", self.du_keys)
+        
+        # Criação das tabelas do Nguyen
+        self._create_table("nguyen_metrics", self.nguyen_metrics_keys)
+        self._create_table("nguyen_prb", self.nguyen_prb_keys)
+        
         self.release_connection()
 
         self.debug = debug
@@ -230,6 +258,18 @@ class SQLiteDatabaseAPI:
 
     def insert_du(self, data: dict):
         self.insert_data('du', data)
+
+    def insert_nguyen_metrics(self, data: dict):
+        # Assegurar que tem um valor dummy para ueImsiComplete para passar na restrição UNIQUE se for nulo
+        if 'ueImsiComplete' not in data or data['ueImsiComplete'] is None:
+            data['ueImsiComplete'] = 0 
+        self.insert_data('nguyen_metrics', data)
+
+    def insert_nguyen_prb(self, data: dict):
+        # Assegurar ueImsiComplete
+        if 'ueImsiComplete' not in data or data['ueImsiComplete'] is None:
+            data['ueImsiComplete'] = data.get('ueId', 0)
+        self.insert_data('nguyen_prb', data)
 
     @lock_connection
     def insert_data(self, table_name, data: dict):
@@ -352,51 +392,4 @@ class SQLiteDatabaseAPI:
                 print("Connection to the database closed.")
 
 if __name__ == "__main__":
-    simulation_dir = "./"
-    db_api = SQLiteDatabaseAPI(simulation_dir, 7, False)
-
-    db_api.insert_data("lte_cu_cp", {
-                             "timestamp": 1000,
-                             "ueImsiComplete": "12T",
-                             "numActiveUes": 12,
-                             "DRB.EstabSucc.5QI.UEID (numDrb)": 1,
-                             "sameCellSinr": 90.3,
-                             "sameCellSinr 3gpp encoded": 93.2,
-                             "id": 1
-                             })
-
-    data = db_api.read_table("lte_cu_cp")
-    print("Read data:", data)
-
-    db_api.insert_lte_cu_up({
-                            "timestamp": 1000,
-                            "ueImsiComplete": "1",
-                            "cellId": 1,
-                            "DRB.PdcpSduDelayDl(cellAverageLatency)": 10,
-                            "m_pDCPBytesDL(cellDlTxVolume)": 10,
-                            "DRB.PdcpSduVolumeDl_Filter.UEID (txBytes)": 100,
-                            "Tot.PdcpSduNbrDl.UEID (txDlPackets)": 100,
-                            "DRB.PdcpSduBitRateDl.UEID (pdcpThroughput)": 100,
-                            "DRB.PdcpSduDelayDl.UEID (pdcpLatency)": 100,
-                            "QosFlow.PdcpPduVolumeDL_Filter.UEID(txPdcpPduBytesNrRlc)": 100,
-                            "DRB.PdcpPduNbrDl.Qos.UEID (txPdcpPduNrRlc)": 100
-                            })
-
-    db_api.insert_lte_cu_up({   "timestamp": 1000,
-                            "ueImsiComplete": "2",
-                            "cellId": 1,
-                            "DRB.PdcpSduDelayDl(cellAverageLatency)": 10,
-                            "m_pDCPBytesDL(cellDlTxVolume)": 10,
-                            "DRB.PdcpSduVolumeDl_Filter.UEID (txBytes)": 100,
-                            "Tot.PdcpSduNbrDl.UEID (txDlPackets)": 100,
-                            "DRB.PdcpSduBitRateDl.UEID (pdcpThroughput)": 200,
-                            "DRB.PdcpSduDelayDl.UEID (pdcpLatency)": 100,
-                            "QosFlow.PdcpPduVolumeDL_Filter.UEID(txPdcpPduBytesNrRlc)": 100,
-                            "DRB.PdcpPduNbrDl.Qos.UEID (txPdcpPduNrRlc)": 100
-                            })
-
-    res = db_api.read_kpms(1000, ["DRB.PdcpSduVolumeDl_Filter.UEID (txBytes)", "Tot.PdcpSduNbrDl.UEID (txDlPackets)"])
-    print("lte_cu_up contents: ", db_api.read_table("lte_cu_up"))
-    print("Read data:", res)
-    #data = db_api.read_avg_thp_cell(1000)
-    #print("Read data:", data)
+    pass
